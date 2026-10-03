@@ -42,6 +42,6 @@ def _clean_tables():
     """Wipe the test DB tables before each test."""
     with engine.begin() as conn:
         conn.execute(text(
-            "TRUNCATE threat_events, threats, events, scans RESTART IDENTITY CASCADE"
+            "TRUNCATE threat_events, threats, events, scans, api_keys RESTART IDENTITY CASCADE"
         ))
     yield

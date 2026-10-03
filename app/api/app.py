@@ -7,6 +7,7 @@ from flask import Flask, jsonify
 
 from app.config import get_settings
 from app.db import ping
+from app.api.limiter import limiter
 from app.api.routes import bp
 
 
@@ -14,6 +15,7 @@ def create_app() -> Flask:
     settings = get_settings()
     app = Flask(settings.APP_NAME)
 
+    limiter.init_app(app)
     app.register_blueprint(bp, url_prefix="/api")
 
     @app.get("/")

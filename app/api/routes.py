@@ -1,21 +1,35 @@
-"""REST endpoints for events, threats, and summary."""
+"""REST endpoints for events, threats, scans, and summary.
+
+Conventions:
+  - Read endpoints: require scope `read` (or auth disabled in dev).
+  - Write endpoints (POST /scans): require scope `write`.
+  - List endpoints support cursor pagination: `?limit=&cursor=<iso_ts>`.
+  - Rate limited per source IP; see decorators below.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy import desc, func, select
 
+from app.api.auth import require_scope
+from app.api.limiter import limiter
 from app.db import session_scope
-from app.models import Event, Threat, ThreatEvent
+from app.models import Event, Scan, Threat, ThreatEvent
+from app.scanner.portscan import DEFAULT_TOP_PORTS, ScanNotAllowed, scan_target
+from app.scanner.store import save_scan
 
 bp = Blueprint("api", __name__)
 
 
 # ---------- helpers ----------
 
-def _iso(dt: datetime | None) -> str | None:
-    return dt.astimezone(timezone.utc).isoformat() if dt else None
+def _iso(dt: Optional[datetime]) -> Optional[str]:
+    # Emit Z (not +00:00) so the value is safe inside a query string.
+    # A literal '+' in a URL query is decoded as space by most HTTP stacks.
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z") if dt else None
 
 
 def _int_arg(name: str, default: int, lo: int, hi: int) -> int:
@@ -26,8 +40,7 @@ def _int_arg(name: str, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, v))
 
 
-def _since_arg() -> datetime | None:
-    """`since` accepts ISO-8601 or `<N><s|m|h|d>` (e.g. 30m, 24h)."""
+def _since_arg() -> Optional[datetime]:
     raw = request.args.get("since")
     if not raw:
         return None
@@ -41,6 +54,27 @@ def _since_arg() -> datetime | None:
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
     except ValueError:
         return None
+
+
+def _cursor_arg() -> Optional[datetime]:
+    raw = request.args.get("cursor")
+    if not raw:
+        return None
+    # Undo the URL-decoding damage: a literal '+' in a query string becomes ' '.
+    raw = raw.replace(" ", "+")
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _paginate(stmt, cursor_col, limit: int, cursor: Optional[datetime]):
+    """Apply (cursor, limit+1) pagination. Returns (rows, next_cursor)."""
+    if cursor is not None:
+        stmt = stmt.where(cursor_col < cursor)
+    stmt = stmt.order_by(desc(cursor_col)).limit(limit + 1)
+    return stmt
 
 
 def _event_to_dict(e: Event) -> dict:
@@ -59,7 +93,7 @@ def _event_to_dict(e: Event) -> dict:
     }
 
 
-def _threat_to_dict(t: Threat, linked_ids: list[int] | None = None) -> dict:
+def _threat_to_dict(t: Threat, linked_ids: Optional[list[int]] = None) -> dict:
     return {
         "id": t.id,
         "ts": _iso(t.ts),
@@ -75,11 +109,27 @@ def _threat_to_dict(t: Threat, linked_ids: list[int] | None = None) -> dict:
     }
 
 
+def _scan_to_dict(s: Scan) -> dict:
+    return {
+        "id": s.id,
+        "ts": _iso(s.ts),
+        "target_ip": s.target_ip,
+        "scan_type": s.scan_type,
+        "open_ports": s.open_ports,
+        "services": s.services,
+        "duration_ms": s.duration_ms,
+        "detail": s.detail,
+    }
+
+
 # ---------- events ----------
 
 @bp.get("/events")
+@limiter.limit("120/minute")
+@require_scope("read")
 def list_events():
     limit = _int_arg("limit", 50, 1, 500)
+    cursor = _cursor_arg()
     severity = request.args.get("severity")
     source_ip = request.args.get("source_ip")
     event_type = request.args.get("event_type")
@@ -95,15 +145,22 @@ def list_events():
             q = q.where(Event.event_type == event_type)
         if since:
             q = q.where(Event.ts >= since)
-        q = q.order_by(desc(Event.ts)).limit(limit)
+        q = _paginate(q, Event.ts, limit, cursor)
         rows = s.execute(q).scalars().all()
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _iso(rows[-1].ts) if (has_more and rows) else None
         return jsonify({
             "count": len(rows),
+            "next_cursor": next_cursor,
             "items": [_event_to_dict(e) for e in rows],
         })
 
 
 @bp.get("/events/<int:eid>")
+@limiter.limit("120/minute")
+@require_scope("read")
 def get_event(eid: int):
     with session_scope() as s:
         e = s.get(Event, eid)
@@ -115,8 +172,11 @@ def get_event(eid: int):
 # ---------- threats ----------
 
 @bp.get("/threats")
+@limiter.limit("120/minute")
+@require_scope("read")
 def list_threats():
     limit = _int_arg("limit", 50, 1, 500)
+    cursor = _cursor_arg()
     rule = request.args.get("rule")
     severity = request.args.get("severity")
     since = _since_arg()
@@ -129,15 +189,22 @@ def list_threats():
             q = q.where(Threat.severity == severity)
         if since:
             q = q.where(Threat.ts >= since)
-        q = q.order_by(desc(Threat.ts)).limit(limit)
+        q = _paginate(q, Threat.ts, limit, cursor)
         rows = s.execute(q).scalars().all()
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _iso(rows[-1].ts) if (has_more and rows) else None
         return jsonify({
             "count": len(rows),
+            "next_cursor": next_cursor,
             "items": [_threat_to_dict(t) for t in rows],
         })
 
 
 @bp.get("/threats/<int:tid>")
+@limiter.limit("120/minute")
+@require_scope("read")
 def get_threat(tid: int):
     with session_scope() as s:
         t = s.get(Threat, tid)
@@ -152,10 +219,10 @@ def get_threat(tid: int):
 # ---------- summary ----------
 
 @bp.get("/summary")
+@limiter.limit("60/minute")
+@require_scope("read")
 def summary():
-    window = request.args.get("window", "24h")
     since = _since_arg() or (datetime.now(timezone.utc) - timedelta(hours=24))
-    _ = window  # currently informational
 
     with session_scope() as s:
         total_events = s.scalar(select(func.count()).select_from(Event).where(Event.ts >= since))
@@ -194,42 +261,34 @@ def summary():
 
 # ---------- scans ----------
 
-from app.models import Scan  # noqa: E402
-from app.scanner.portscan import (  # noqa: E402
-    DEFAULT_TOP_PORTS,
-    ScanNotAllowed,
-    scan_target,
-)
-from app.scanner.store import save_scan  # noqa: E402
-
-
-def _scan_to_dict(s: Scan) -> dict:
-    return {
-        "id": s.id,
-        "ts": _iso(s.ts),
-        "target_ip": s.target_ip,
-        "scan_type": s.scan_type,
-        "open_ports": s.open_ports,
-        "services": s.services,
-        "duration_ms": s.duration_ms,
-        "detail": s.detail,
-    }
-
-
 @bp.get("/scans")
+@limiter.limit("60/minute")
+@require_scope("read")
 def list_scans():
     limit = _int_arg("limit", 50, 1, 500)
+    cursor = _cursor_arg()
     target = request.args.get("target_ip")
+
     with session_scope() as s:
         q = select(Scan)
         if target:
             q = q.where(Scan.target_ip == target)
-        q = q.order_by(desc(Scan.ts)).limit(limit)
+        q = _paginate(q, Scan.ts, limit, cursor)
         rows = s.execute(q).scalars().all()
-        return jsonify({"count": len(rows), "items": [_scan_to_dict(x) for x in rows]})
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _iso(rows[-1].ts) if (has_more and rows) else None
+        return jsonify({
+            "count": len(rows),
+            "next_cursor": next_cursor,
+            "items": [_scan_to_dict(x) for x in rows],
+        })
 
 
 @bp.get("/scans/<int:sid>")
+@limiter.limit("60/minute")
+@require_scope("read")
 def get_scan(sid: int):
     with session_scope() as s:
         row = s.get(Scan, sid)
@@ -239,6 +298,8 @@ def get_scan(sid: int):
 
 
 @bp.post("/scans")
+@limiter.limit("5/minute")
+@require_scope("write")
 def create_scan():
     body = request.get_json(silent=True) or {}
     target = body.get("target")
