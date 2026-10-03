@@ -18,8 +18,10 @@ from app.api.auth import require_scope
 from app.api.limiter import limiter
 from app.db import session_scope
 from app.models import Event, Scan, Threat, ThreatEvent
+from app.scanner.audit import link_scan, record_request
 from app.scanner.portscan import DEFAULT_TOP_PORTS, ScanNotAllowed, scan_target
 from app.scanner.store import save_scan
+from app.models import ScanAudit
 
 bp = Blueprint("api", __name__)
 
@@ -106,6 +108,19 @@ def _threat_to_dict(t: Threat, linked_ids: Optional[list[int]] = None) -> dict:
         "summary": t.summary,
         "detail": t.detail,
         "linked_event_ids": linked_ids,
+    }
+
+
+def _scan_audit_to_dict(a: ScanAudit) -> dict:
+    return {
+        "id": a.id,
+        "ts": _iso(a.ts),
+        "requester": a.requester,
+        "target_ip": a.target_ip,
+        "ports_json": a.ports_json,
+        "allowed": a.allowed,
+        "reason": a.reason,
+        "scan_id": a.scan_id,
     }
 
 
@@ -301,10 +316,14 @@ def get_scan(sid: int):
 @limiter.limit("5/minute")
 @require_scope("write")
 def create_scan():
+    from flask import g
+
     body = request.get_json(silent=True) or {}
     target = body.get("target")
     ports = body.get("ports") or DEFAULT_TOP_PORTS
     banners = bool(body.get("banners", True))
+
+    requester = getattr(g, "api_key_name", "anonymous")
 
     if not target:
         return jsonify({"error": "target is required"}), 400
@@ -315,13 +334,78 @@ def create_scan():
     except (TypeError, ValueError):
         return jsonify({"error": "ports must be integers"}), 400
 
+    # Audit BEFORE the scan runs. If the scan is forbidden, this row records
+    # who tried to scan what, when, and why it was refused.
+    audit_id = record_request(
+        requester=requester,
+        target_ip=target,
+        ports=ports,
+        allowed=False,   # flipped to True once scan succeeds
+        reason=None,
+    )
+
     try:
         result = scan_target(target, ports, banners=banners)
     except ScanNotAllowed as exc:
+        # Update the audit row with the refusal reason
+        from app.db import session_scope as _ss
+        from app.models import ScanAudit as _SA
+        with _ss() as _s:
+            row = _s.get(_SA, audit_id)
+            if row is not None:
+                row.reason = str(exc)[:255]
         return jsonify({"error": "forbidden", "detail": str(exc)}), 403
     except OSError as exc:
+        from app.db import session_scope as _ss
+        from app.models import ScanAudit as _SA
+        with _ss() as _s:
+            row = _s.get(_SA, audit_id)
+            if row is not None:
+                row.reason = f"scan failed: {exc}"[:255]
         return jsonify({"error": "scan failed", "detail": str(exc)}), 500
 
     sid = save_scan(result)
-    return jsonify({"id": sid, **{k: (v.isoformat() if hasattr(v, "isoformat") else v)
-                                  for k, v in result.items()}}), 201
+    link_scan(audit_id, sid)
+
+    # Mark the audit row as allowed
+    from app.db import session_scope as _ss
+    from app.models import ScanAudit as _SA
+    with _ss() as _s:
+        row = _s.get(_SA, audit_id)
+        if row is not None:
+            row.allowed = True
+
+    return jsonify({"id": sid, "audit_id": audit_id,
+                    **{k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                       for k, v in result.items()}}), 201
+
+
+@bp.get("/scan_audit")
+@limiter.limit("60/minute")
+@require_scope("read")
+def list_scan_audit():
+    limit = _int_arg("limit", 50, 1, 500)
+    cursor = _cursor_arg()
+    requester = request.args.get("requester")
+    target = request.args.get("target_ip")
+    allowed_raw = request.args.get("allowed")
+
+    with session_scope() as s:
+        q = select(ScanAudit)
+        if requester:
+            q = q.where(ScanAudit.requester == requester)
+        if target:
+            q = q.where(ScanAudit.target_ip == target)
+        if allowed_raw is not None:
+            q = q.where(ScanAudit.allowed.is_(allowed_raw.lower() in ("1", "true", "yes")))
+        q = _paginate(q, ScanAudit.ts, limit, cursor)
+        rows = s.execute(q).scalars().all()
+
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = _iso(rows[-1].ts) if (has_more and rows) else None
+        return jsonify({
+            "count": len(rows),
+            "next_cursor": next_cursor,
+            "items": [_scan_audit_to_dict(x) for x in rows],
+        })

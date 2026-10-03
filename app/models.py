@@ -120,3 +120,30 @@ class ApiKey(Base):
     )
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+
+class ScanAudit(Base):
+    """Immutable record of every scan *request*, whether allowed or not.
+
+    Written before the scanner runs, so even forbidden targets leave a paper
+    trail with the requester's identity (API-key name or 'anonymous').
+    """
+
+    __tablename__ = "scan_audit"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    ts: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    requester: Mapped[str] = mapped_column(String(64), nullable=False, default="anonymous", index=True)
+    target_ip: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
+    ports_json: Mapped[list[int]] = mapped_column(JSONB, default=list)
+    allowed: Mapped[bool] = mapped_column(nullable=False, default=False)
+    reason: Mapped[Optional[str]] = mapped_column(String(255))
+    scan_id: Mapped[Optional[int]] = mapped_column(
+        BigInteger, ForeignKey("scans.id", ondelete="SET NULL")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
