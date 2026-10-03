@@ -1,0 +1,27 @@
+# --- Web / API ---
+Flask==3.0.3
+flask-smorest==0.44.0
+marshmallow==3.22.0
+gunicorn==22.0.0
+
+# --- Database ---
+SQLAlchemy==2.0.35
+psycopg[binary]==3.2.3
+alembic==1.13.3
+
+# --- Config / parsing ---
+python-dotenv==1.0.1
+pydantic==2.9.2
+
+# --- Networking / scanning ---
+scapy==2.6.1
+python-nmap==0.7.1
+
+# --- Security / parsing helpers ---
+regex==2024.9.11
+python-dateutil==2.9.0.post0
+
+# --- Dev / test ---
+pytest==8.3.3
+pytest-cov==6.0.0
+ruff==0.6.9
