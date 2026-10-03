@@ -106,6 +106,7 @@ def _threat_to_dict(t: Threat, linked_ids: Optional[list[int]] = None) -> dict:
         "window_start": _iso(t.window_start),
         "window_end": _iso(t.window_end),
         "summary": t.summary,
+        "mitre_techniques": t.mitre_techniques or [],
         "detail": t.detail,
         "linked_event_ids": linked_ids,
     }
@@ -409,3 +410,12 @@ def list_scan_audit():
             "next_cursor": next_cursor,
             "items": [_scan_audit_to_dict(x) for x in rows],
         })
+
+# ---------- mitre ----------
+
+@bp.get("/mitre")
+@limiter.limit("120/minute")
+@require_scope("read")
+def list_mitre():
+    from app.detection import mitre
+    return jsonify({"count": len(mitre.CATALOG), "items": mitre.all_techniques()})

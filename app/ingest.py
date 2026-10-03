@@ -104,13 +104,14 @@ def persist_findings(
             threat = Threat(
                 ts=f.ts,
                 rule=f.rule,
-                severity=f.severity,
+                severity=f.severity.value if hasattr(f.severity, "value") else str(f.severity),
                 source_ip=f.source_ip,
                 count=f.count,
                 window_start=f.window_start,
                 window_end=f.window_end,
                 summary=f.summary,
                 dedup_key=f.key(),
+                mitre_techniques=list(f.mitre_techniques),
                 detail=f.detail,
             )
             s.add(threat)

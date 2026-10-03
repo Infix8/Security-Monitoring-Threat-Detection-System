@@ -63,7 +63,8 @@ def test_brute_force_fires_at_threshold():
     assert f.rule == "brute_force"
     assert f.source_ip == "1.2.3.4"
     assert f.count == 5
-    assert f.severity == "warning"
+    from app.detection.severity import Severity
+    assert f.severity is Severity.HIGH
 
 
 def test_brute_force_escalates_severity_on_double():

@@ -61,6 +61,7 @@ class Threat(Base):
     window_end: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     summary: Mapped[Optional[str]] = mapped_column(Text)
     dedup_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    mitre_techniques: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     detail: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

@@ -64,4 +64,5 @@ def test_sample_file_feeds_portscan_rule():
     f = findings[0]
     assert f.source_ip == "203.0.113.99"
     assert f.count >= 15
-    assert f.severity == "warning"
+    from app.detection.severity import Severity
+    assert f.severity is Severity.MEDIUM

@@ -13,6 +13,7 @@ from typing import Iterable
 
 from app.config import get_settings
 from app.detection.base import Finding
+from app.detection.severity import Severity
 from app.parsers.base import ParsedEvent
 
 
@@ -69,7 +70,7 @@ def rule_brute_force(events: list[ParsedEvent]) -> list[Finding]:
             findings.append(
                 Finding(
                     rule="brute_force",
-                    severity="critical" if count >= threshold * 2 else "warning",
+                    severity=Severity.CRITICAL if count >= threshold * 2 else Severity.HIGH,
                     ts=win_end,
                     source_ip=ip,
                     count=count,
@@ -80,6 +81,7 @@ def rule_brute_force(events: list[ParsedEvent]) -> list[Finding]:
                         f"{int((win_end - win_start).total_seconds())}s "
                         f"(threshold {threshold}); targets={usernames}"
                     ),
+                    mitre_techniques=("T1110", "T1110.001"),
                     detail={"usernames": usernames, "threshold": threshold},
                     event_indices=[i for i, _ in group],
                 )
@@ -111,7 +113,7 @@ def rule_port_scan(events: list[ParsedEvent]) -> list[Finding]:
             findings.append(
                 Finding(
                     rule="port_scan",
-                    severity="warning",
+                    severity=Severity.MEDIUM,
                     ts=win_end,
                     source_ip=ip,
                     count=len(ports),
@@ -121,6 +123,7 @@ def rule_port_scan(events: list[ParsedEvent]) -> list[Finding]:
                         f"Possible port scan: {ip} touched {len(ports)} distinct "
                         f"ports in {int((win_end - win_start).total_seconds())}s"
                     ),
+                    mitre_techniques=("T1046",),
                     detail={"ports": ports, "threshold": distinct_ports},
                     event_indices=[i for i, _ in group],
                 )
@@ -153,13 +156,14 @@ def rule_suspicious_connection(events: list[ParsedEvent]) -> list[Finding]:
             findings.append(
                 Finding(
                     rule="suspicious_connection",
-                    severity="notice",
+                    severity=Severity.MEDIUM,
                     ts=seq[-1][1].ts,
                     source_ip=ip,
                     count=len(seq),
                     window_start=seq[0][1].ts,
                     window_end=seq[-1][1].ts,
                     summary=f"Multiple invalid-user attempts ({len(seq)}) from {ip}",
+                    mitre_techniques=("T1110.001", "T1078"),
                     detail={"reason": "invalid_user_burst"},
                     event_indices=[i for i, _ in seq],
                 )
@@ -170,13 +174,14 @@ def rule_suspicious_connection(events: list[ParsedEvent]) -> list[Finding]:
             findings.append(
                 Finding(
                     rule="suspicious_connection",
-                    severity="warning",
+                    severity=Severity.HIGH,
                     ts=seq[-1][1].ts,
                     source_ip=ip,
                     count=len(seq),
                     window_start=seq[0][1].ts,
                     window_end=seq[-1][1].ts,
                     summary=f"Burst of preauth disconnects ({len(seq)}) from {ip}",
+                    mitre_techniques=("T1110",),
                     detail={"reason": "preauth_disconnect_burst"},
                     event_indices=[i for i, _ in seq],
                 )
@@ -192,10 +197,9 @@ def run_all(events: list[ParsedEvent]) -> list[Finding]:
     out: list[Finding] = []
     for rule in ALL_RULES:
         out.extend(rule(events))
-    order = {"info": 0, "notice": 1, "warning": 2, "error": 3, "critical": 4}
     best: dict[str, Finding] = {}
     for f in out:
         k = f.key()
-        if k not in best or order[f.severity] > order[best[k].severity]:
+        if k not in best or f.severity.rank > best[k].severity.rank:
             best[k] = f
     return sorted(best.values(), key=lambda f: f.ts)
