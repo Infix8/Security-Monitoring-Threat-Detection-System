@@ -18,7 +18,7 @@ scapy==2.6.1
 python-nmap==0.7.1
 
 # --- Security / parsing helpers ---
-regex==2024.9.11
+regex==2026.9.29
 python-dateutil==2.9.0.post0
 
 # --- Dev / test ---
