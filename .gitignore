@@ -16,3 +16,4 @@ build/
 sample_logs/*.parsed
 .pytest_cache/
 .env.production
+.state/

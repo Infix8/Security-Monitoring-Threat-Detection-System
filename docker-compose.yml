@@ -28,7 +28,6 @@ services:
       db:
         condition: service_healthy
     environment:
-      # In-network: override host-dev value from .env
       POSTGRES_HOST: db
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ${POSTGRES_DB:-secmon}
@@ -51,5 +50,73 @@ services:
       timeout: 3s
       retries: 10
 
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: secmon-api:dev
+    container_name: secmon-watcher
+    restart: unless-stopped
+    # The watcher reads /var/log/auth.log which on Ubuntu is root:adm 640.
+    # The image's non-root user cannot open it, so this one service runs as
+    # root. The API service (above) stays unprivileged.
+    user: "0:0"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-secmon}
+      POSTGRES_USER: ${POSTGRES_USER:-secmon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      APP_ENV: ${APP_ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FAILED_LOGIN_THRESHOLD: ${FAILED_LOGIN_THRESHOLD:-5}
+      FAILED_LOGIN_WINDOW_SEC: ${FAILED_LOGIN_WINDOW_SEC:-300}
+      PORTSCAN_DISTINCT_PORTS: ${PORTSCAN_DISTINCT_PORTS:-15}
+      PORTSCAN_WINDOW_SEC: ${PORTSCAN_WINDOW_SEC:-60}
+      SCAN_ALLOWED_CIDRS: ${SCAN_ALLOWED_CIDRS:-127.0.0.1/32,10.0.0.0/8,192.168.0.0/16}
+      WATCHER_STATE_DIR: /state
+    volumes:
+      - watcher_state:/state
+      - /var/log:/var/log:ro
+    # If your host lacks /var/log/auth.log, the watcher stays up and retries.
+    command: ["python", "-m", "app.watcher", "--source", "auth", "--path", "/var/log/auth.log", "--interval", "3"]
+
+  watcher-ufw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: secmon-api:dev
+    container_name: secmon-watcher-ufw
+    restart: unless-stopped
+    # Same rationale as the auth watcher: /var/log/kern.log is root-readable only.
+    user: "0:0"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB:-secmon}
+      POSTGRES_USER: ${POSTGRES_USER:-secmon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      APP_ENV: ${APP_ENV:-dev}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      FAILED_LOGIN_THRESHOLD: ${FAILED_LOGIN_THRESHOLD:-5}
+      FAILED_LOGIN_WINDOW_SEC: ${FAILED_LOGIN_WINDOW_SEC:-300}
+      PORTSCAN_DISTINCT_PORTS: ${PORTSCAN_DISTINCT_PORTS:-15}
+      PORTSCAN_WINDOW_SEC: ${PORTSCAN_WINDOW_SEC:-60}
+      SCAN_ALLOWED_CIDRS: ${SCAN_ALLOWED_CIDRS:-127.0.0.1/32,10.0.0.0/8,192.168.0.0/16}
+      WATCHER_STATE_DIR: /state
+    volumes:
+      - watcher_ufw_state:/state
+      - /var/log:/var/log:ro
+    # Switch --path to /var/log/ufw.log if your host has a dedicated UFW log.
+    command: ["python", "-m", "app.watcher", "--source", "ufw", "--path", "/var/log/kern.log", "--interval", "3"]
+
 volumes:
   pgdata:
+  watcher_ufw_state:
+  watcher_state:
