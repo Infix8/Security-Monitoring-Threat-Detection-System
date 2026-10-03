@@ -11,7 +11,7 @@ alembic==1.13.3
 
 # --- Config / parsing ---
 python-dotenv==1.0.1
-pydantic==2.9.2
+pydantic==2.13.5
 
 # --- Networking / scanning ---
 scapy==2.6.1
